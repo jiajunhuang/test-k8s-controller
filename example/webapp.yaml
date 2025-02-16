@@ -1,0 +1,7 @@
+apiVersion: jiajunhuang.com/v1alpha1
+kind: WebApp
+metadata:
+  name: webapp-sample
+spec:
+  version: stable-alpine3.20-perl
+  replicas: 2
