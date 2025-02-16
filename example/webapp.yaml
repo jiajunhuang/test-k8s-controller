@@ -1,4 +1,4 @@
-apiVersion: jiajunhuang.com/v1alpha1
+apiVersion: jiajunhuang.com/v1
 kind: WebApp
 metadata:
   name: webapp-sample
