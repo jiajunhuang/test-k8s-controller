@@ -180,51 +180,43 @@ func (c *Controller) syncHandler(ctx context.Context, objectRef types.Namespaced
 	executor := &defaultTaskExecutor{}
 
 	webapp, err := c.webappsLister.WebApps(objectRef.Namespace).Get(objectRef.Name)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			// 当对象不存在时，执行删除操作
-			dummyWebApp := &v1.WebApp{}
-			dummyWebApp.Namespace = objectRef.Namespace
-			dummyWebApp.Name = objectRef.Name
-
-			if err := executor.PreDelete(ctx, dummyWebApp); err != nil {
-				return fmt.Errorf("执行 PreDelete 失败: %v", err)
-			}
-			if err := executor.Delete(ctx, dummyWebApp); err != nil {
-				return fmt.Errorf("执行 Delete 失败: %v", err)
-			}
-			if err := executor.PostDelete(ctx, dummyWebApp); err != nil {
-				return fmt.Errorf("执行 PostDelete 失败: %v", err)
-			}
-
-			logger.Info("同步 webapp 删除完成", "webapp", objectRef.String())
-			return nil
-		}
+	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 
-	// 检查是否为删除操作
-	if webapp.DeletionTimestamp != nil {
-		if err := executor.PreDelete(ctx, webapp); err != nil {
+	// 如果对象不存在或已标记删除，执行删除操作
+	if apierrors.IsNotFound(err) || (webapp != nil && webapp.DeletionTimestamp != nil) {
+		targetWebApp := webapp
+		if targetWebApp == nil {
+			// 如果对象不存在，创建一个临时对象用于删除操作
+			targetWebApp = &v1.WebApp{}
+			targetWebApp.Namespace = objectRef.Namespace
+			targetWebApp.Name = objectRef.Name
+		}
+
+		if err := executor.PreDelete(ctx, targetWebApp); err != nil {
 			return fmt.Errorf("执行 PreDelete 失败: %v", err)
 		}
-		if err := executor.Delete(ctx, webapp); err != nil {
+		if err := executor.Delete(ctx, targetWebApp); err != nil {
 			return fmt.Errorf("执行 Delete 失败: %v", err)
 		}
-		if err := executor.PostDelete(ctx, webapp); err != nil {
+		if err := executor.PostDelete(ctx, targetWebApp); err != nil {
 			return fmt.Errorf("执行 PostDelete 失败: %v", err)
 		}
-	} else {
-		// Create/Update 操作
-		if err := executor.PreCreate(ctx, webapp); err != nil {
-			return fmt.Errorf("执行 PreCreate 失败: %v", err)
-		}
-		if err := executor.Create(ctx, webapp); err != nil {
-			return fmt.Errorf("执行 Create 失败: %v", err)
-		}
-		if err := executor.PostCreate(ctx, webapp); err != nil {
-			return fmt.Errorf("执行 PostCreate 失败: %v", err)
-		}
+
+		logger.Info("同步 webapp 删除完成", "webapp", objectRef.String())
+		return nil
+	}
+
+	// Create/Update 操作
+	if err := executor.PreCreate(ctx, webapp); err != nil {
+		return fmt.Errorf("执行 PreCreate 失败: %v", err)
+	}
+	if err := executor.Create(ctx, webapp); err != nil {
+		return fmt.Errorf("执行 Create 失败: %v", err)
+	}
+	if err := executor.PostCreate(ctx, webapp); err != nil {
+		return fmt.Errorf("执行 PostCreate 失败: %v", err)
 	}
 
 	logger.Info("同步 webapp 完成", "webapp", webapp.Name)
