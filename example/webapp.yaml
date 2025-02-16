@@ -3,5 +3,6 @@ kind: WebApp
 metadata:
   name: webapp-sample
 spec:
-  version: stable-alpine3.20-perl
+  version: "stable-alpine3.20-perl"
   replicas: 2
+  image: "nginx:latest"  # 可选字段

@@ -20,6 +20,7 @@ type WebApp struct {
 type WebAppSpec struct {
 	// 在这里添加你的规格字段
 	Image    string `json:"image"`
+	Version  string `json:"version"`
 	Replicas int32  `json:"replicas"`
 }
 

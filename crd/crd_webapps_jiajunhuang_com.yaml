@@ -27,6 +27,44 @@ spec:
               version:
                 type: string
                 description: The version of the webapp
+                minLength: 1
               replicas:
                 type: integer
+                minimum: 0
                 description: The number of replicas of the webapp
+              image:
+                type: string
+                description: The container image to use
+                minLength: 1
+          status:
+            type: object
+            properties:
+              availableReplicas:
+                type: integer
+                description: The number of available replicas
+              conditions:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    lastTransitionTime:
+                      type: string
+                      format: date-time
+                    reason:
+                      type: string
+                    message:
+                      type: string
+    subresources:
+      status: {}
+    additionalPrinterColumns:
+    - name: Replicas
+      type: integer
+      description: The number of replicas
+      jsonPath: .spec.replicas
+    - name: Version
+      type: string
+      description: The version of the webapp
+      jsonPath: .spec.version
+    - name: Age
+      type: date
+      jsonPath: .metadata.creationTimestamp

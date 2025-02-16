@@ -24,6 +24,7 @@ import (
 	webappscheme "github.com/jiajunhuang/test/pkg/generated/clientset/versioned/scheme"
 	informers "github.com/jiajunhuang/test/pkg/generated/informers/externalversions/jiajunhuang.com/v1"
 	v1lister "github.com/jiajunhuang/test/pkg/generated/listers/jiajunhuang.com/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // TaskExecutor 定义任务执行器接口
@@ -84,6 +85,11 @@ type Controller struct {
 
 	executor TaskExecutor
 }
+
+const (
+	// 添加 finalizer 常量
+	webappFinalizer = "webapp.jiajunhuang.com/finalizer"
+)
 
 func NewController(
 	ctx context.Context,
@@ -184,31 +190,75 @@ func (c *Controller) syncHandler(ctx context.Context, objectRef types.Namespaced
 		return err
 	}
 
-	// 如果对象不存在或已标记删除，执行删除操作
-	if apierrors.IsNotFound(err) || (webapp != nil && webapp.DeletionTimestamp != nil) {
-		targetWebApp := webapp
-		if targetWebApp == nil {
-			// 如果对象不存在，创建一个临时对象用于删除操作
-			targetWebApp = &v1.WebApp{}
-			targetWebApp.Namespace = objectRef.Namespace
-			targetWebApp.Name = objectRef.Name
-		}
-
-		if err := executor.PreDelete(ctx, targetWebApp); err != nil {
-			return fmt.Errorf("执行 PreDelete 失败: %v", err)
-		}
-		if err := executor.Delete(ctx, targetWebApp); err != nil {
-			return fmt.Errorf("执行 Delete 失败: %v", err)
-		}
-		if err := executor.PostDelete(ctx, targetWebApp); err != nil {
-			return fmt.Errorf("执行 PostDelete 失败: %v", err)
-		}
-
-		logger.Info("同步 webapp 删除完成", "webapp", objectRef.String())
+	// 如果对象不存在，直接返回
+	if apierrors.IsNotFound(err) {
+		logger.Info("WebApp 已经被删除", "webapp", objectRef.String())
 		return nil
 	}
 
-	// Create/Update 操作
+	// 处理删除操作
+	if webapp.DeletionTimestamp != nil {
+		return c.handleDeletion(ctx, webapp, executor)
+	}
+
+	// 处理创建/更新操作
+	return c.handleCreation(ctx, webapp, executor)
+}
+
+// 处理删除操作
+func (c *Controller) handleDeletion(ctx context.Context, webapp *v1.WebApp, executor TaskExecutor) error {
+	logger := klog.FromContext(ctx)
+
+	// 检查是否包含我们的 finalizer
+	if !containsFinalizer(webapp.Finalizers, webappFinalizer) {
+		return nil
+	}
+
+	// 执行删除相关操作
+	if err := executor.PreDelete(ctx, webapp); err != nil {
+		return fmt.Errorf("执行 PreDelete 失败: %v", err)
+	}
+	if err := executor.Delete(ctx, webapp); err != nil {
+		return fmt.Errorf("执行 Delete 失败: %v", err)
+	}
+	if err := executor.PostDelete(ctx, webapp); err != nil {
+		return fmt.Errorf("执行 PostDelete 失败: %v", err)
+	}
+
+	// 删除 finalizer
+	webappCopy := webapp.DeepCopy()
+	webappCopy.Finalizers = removeFinalizer(webappCopy.Finalizers, webappFinalizer)
+	_, err := c.webclientset.JiajunhuangV1().WebApps(webapp.Namespace).Update(ctx, webappCopy, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("移除 finalizer 失败: %v", err)
+	}
+
+	logger.Info("成功完成删除操作", "webapp", webapp.Name)
+	return nil
+}
+
+// 处理创建/更新操作
+func (c *Controller) handleCreation(ctx context.Context, webapp *v1.WebApp, executor TaskExecutor) error {
+	// 确保有 finalizer
+	if !containsFinalizer(webapp.Finalizers, webappFinalizer) {
+		webappCopy := webapp.DeepCopy()
+		webappCopy.Finalizers = append(webappCopy.Finalizers, webappFinalizer)
+		var err error
+		webapp, err = c.webclientset.JiajunhuangV1().WebApps(webapp.Namespace).Update(ctx, webappCopy, metav1.UpdateOptions{})
+		if err != nil {
+			// 如果是验证错误，记录详细信息并返回
+			if apierrors.IsInvalid(err) {
+				logger := klog.FromContext(ctx)
+				logger.Error(err, "资源验证失败",
+					"webapp", klog.KObj(webapp),
+					"details", err.(*apierrors.StatusError).ErrStatus.Details)
+				// 这种情况下不需要重试
+				return nil
+			}
+			return fmt.Errorf("添加 finalizer 失败: %v", err)
+		}
+	}
+
 	if err := executor.PreCreate(ctx, webapp); err != nil {
 		return fmt.Errorf("执行 PreCreate 失败: %v", err)
 	}
@@ -219,6 +269,26 @@ func (c *Controller) syncHandler(ctx context.Context, objectRef types.Namespaced
 		return fmt.Errorf("执行 PostCreate 失败: %v", err)
 	}
 
-	logger.Info("同步 webapp 完成", "webapp", webapp.Name)
 	return nil
+}
+
+// 辅助函数：检查是否包含 finalizer
+func containsFinalizer(finalizers []string, finalizer string) bool {
+	for _, f := range finalizers {
+		if f == finalizer {
+			return true
+		}
+	}
+	return false
+}
+
+// 辅助函数：移除 finalizer
+func removeFinalizer(finalizers []string, finalizer string) []string {
+	var result []string
+	for _, f := range finalizers {
+		if f != finalizer {
+			result = append(result, f)
+		}
+	}
+	return result
 }
