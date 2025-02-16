@@ -19,11 +19,53 @@ import (
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	clientset "github.com/jiajunhuang/test/pkg/generated/clientset/versioned"
-	"github.com/jiajunhuang/test/pkg/generated/clientset/versioned/scheme"
 	webappscheme "github.com/jiajunhuang/test/pkg/generated/clientset/versioned/scheme"
 	informers "github.com/jiajunhuang/test/pkg/generated/informers/externalversions/jiajunhuang.com/v1"
 	v1lister "github.com/jiajunhuang/test/pkg/generated/listers/jiajunhuang.com/v1"
 )
+
+type TaskExecutor interface {
+	PreCreate(ctx context.Context, objectRef cache.ObjectName) error
+	Create(ctx context.Context, objectRef cache.ObjectName) error
+	PostCreate(ctx context.Context, objectRef cache.ObjectName) error
+	PreDelete(ctx context.Context, objectRef cache.ObjectName) error
+	Delete(ctx context.Context, objectRef cache.ObjectName) error
+	PostDelete(ctx context.Context, objectRef cache.ObjectName) error
+}
+
+var _ TaskExecutor = &DemoExecutor{}
+
+type DemoExecutor struct{}
+
+func (e *DemoExecutor) PreCreate(ctx context.Context, objectRef cache.ObjectName) error {
+	fmt.Printf("PreCreate: %s\n", objectRef)
+	return nil
+}
+
+func (e *DemoExecutor) Create(ctx context.Context, objectRef cache.ObjectName) error {
+	fmt.Printf("Create: %s\n", objectRef)
+	return nil
+}
+
+func (e *DemoExecutor) PostCreate(ctx context.Context, objectRef cache.ObjectName) error {
+	fmt.Printf("PostCreate: %s\n", objectRef)
+	return nil
+}
+
+func (e *DemoExecutor) PreDelete(ctx context.Context, objectRef cache.ObjectName) error {
+	fmt.Printf("PreDelete: %s\n", objectRef)
+	return nil
+}
+
+func (e *DemoExecutor) Delete(ctx context.Context, objectRef cache.ObjectName) error {
+	fmt.Printf("Delete: %s\n", objectRef)
+	return nil
+}
+
+func (e *DemoExecutor) PostDelete(ctx context.Context, objectRef cache.ObjectName) error {
+	fmt.Printf("PostDelete: %s\n", objectRef)
+	return nil
+}
 
 type Controller struct {
 	kubeclientset kubernetes.Interface
@@ -34,6 +76,8 @@ type Controller struct {
 
 	workqueue workqueue.TypedRateLimitingInterface[cache.ObjectName]
 	recorder  record.EventRecorder
+
+	executor TaskExecutor
 }
 
 func NewController(
@@ -43,12 +87,12 @@ func NewController(
 	webappsInformer informers.WebAppInformer,
 ) (*Controller, error) {
 	logger := klog.FromContext(ctx)
-	utilruntime.Must(webappscheme.AddToScheme(scheme.Scheme))
+	utilruntime.Must(webappscheme.AddToScheme(webappscheme.Scheme))
 
 	eventBroadcaster := record.NewBroadcaster(record.WithContext(ctx))
 	eventBroadcaster.StartStructuredLogging(0)
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: kubeclientset.CoreV1().Events("")})
-	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "web-app-controller"})
+	recorder := eventBroadcaster.NewRecorder(webappscheme.Scheme, corev1.EventSource{Component: "web-app-controller"})
 	ratelimiter := workqueue.NewTypedMaxOfRateLimiter(
 		workqueue.NewTypedItemExponentialFailureRateLimiter[cache.ObjectName](5*time.Millisecond, 1000*time.Second),
 		&workqueue.TypedBucketRateLimiter[cache.ObjectName]{Limiter: rate.NewLimiter(rate.Limit(50), 300)},
