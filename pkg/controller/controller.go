@@ -8,6 +8,7 @@ import (
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
@@ -18,52 +19,56 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 
+	v1 "github.com/jiajunhuang/test/pkg/apis/jiajunhuang.com/v1"
 	clientset "github.com/jiajunhuang/test/pkg/generated/clientset/versioned"
 	webappscheme "github.com/jiajunhuang/test/pkg/generated/clientset/versioned/scheme"
 	informers "github.com/jiajunhuang/test/pkg/generated/informers/externalversions/jiajunhuang.com/v1"
 	v1lister "github.com/jiajunhuang/test/pkg/generated/listers/jiajunhuang.com/v1"
 )
 
+// TaskExecutor 定义任务执行器接口
 type TaskExecutor interface {
-	PreCreate(ctx context.Context, objectRef cache.ObjectName) error
-	Create(ctx context.Context, objectRef cache.ObjectName) error
-	PostCreate(ctx context.Context, objectRef cache.ObjectName) error
-	PreDelete(ctx context.Context, objectRef cache.ObjectName) error
-	Delete(ctx context.Context, objectRef cache.ObjectName) error
-	PostDelete(ctx context.Context, objectRef cache.ObjectName) error
+	PreCreate(ctx context.Context, webapp *v1.WebApp) error
+	Create(ctx context.Context, webapp *v1.WebApp) error
+	PostCreate(ctx context.Context, webapp *v1.WebApp) error
+	PreDelete(ctx context.Context, webapp *v1.WebApp) error
+	Delete(ctx context.Context, webapp *v1.WebApp) error
+	PostDelete(ctx context.Context, webapp *v1.WebApp) error
 }
 
-var _ TaskExecutor = &DemoExecutor{}
+// defaultTaskExecutor 实现 TaskExecutor 接口
+type defaultTaskExecutor struct {
+	// 可以在这里添加需要的依赖
+}
 
-type DemoExecutor struct{}
-
-func (e *DemoExecutor) PreCreate(ctx context.Context, objectRef cache.ObjectName) error {
-	fmt.Printf("PreCreate: %s\n", objectRef)
+// 实现所有接口方法
+func (e *defaultTaskExecutor) PreCreate(ctx context.Context, webapp *v1.WebApp) error {
+	klog.FromContext(ctx).Info("执行 PreCreate", "webapp", webapp.Name)
 	return nil
 }
 
-func (e *DemoExecutor) Create(ctx context.Context, objectRef cache.ObjectName) error {
-	fmt.Printf("Create: %s\n", objectRef)
+func (e *defaultTaskExecutor) Create(ctx context.Context, webapp *v1.WebApp) error {
+	klog.FromContext(ctx).Info("执行 Create", "webapp", webapp.Name)
 	return nil
 }
 
-func (e *DemoExecutor) PostCreate(ctx context.Context, objectRef cache.ObjectName) error {
-	fmt.Printf("PostCreate: %s\n", objectRef)
+func (e *defaultTaskExecutor) PostCreate(ctx context.Context, webapp *v1.WebApp) error {
+	klog.FromContext(ctx).Info("执行 PostCreate", "webapp", webapp.Name)
 	return nil
 }
 
-func (e *DemoExecutor) PreDelete(ctx context.Context, objectRef cache.ObjectName) error {
-	fmt.Printf("PreDelete: %s\n", objectRef)
+func (e *defaultTaskExecutor) PreDelete(ctx context.Context, webapp *v1.WebApp) error {
+	klog.FromContext(ctx).Info("执行 PreDelete", "webapp", webapp.Name)
 	return nil
 }
 
-func (e *DemoExecutor) Delete(ctx context.Context, objectRef cache.ObjectName) error {
-	fmt.Printf("Delete: %s\n", objectRef)
+func (e *defaultTaskExecutor) Delete(ctx context.Context, webapp *v1.WebApp) error {
+	klog.FromContext(ctx).Info("执行 Delete", "webapp", webapp.Name)
 	return nil
 }
 
-func (e *DemoExecutor) PostDelete(ctx context.Context, objectRef cache.ObjectName) error {
-	fmt.Printf("PostDelete: %s\n", objectRef)
+func (e *defaultTaskExecutor) PostDelete(ctx context.Context, webapp *v1.WebApp) error {
+	klog.FromContext(ctx).Info("执行 PostDelete", "webapp", webapp.Name)
 	return nil
 }
 
@@ -74,7 +79,7 @@ type Controller struct {
 	webappsLister v1lister.WebAppLister
 	webappsSynced cache.InformerSynced
 
-	workqueue workqueue.TypedRateLimitingInterface[cache.ObjectName]
+	workqueue workqueue.TypedRateLimitingInterface[types.NamespacedName]
 	recorder  record.EventRecorder
 
 	executor TaskExecutor
@@ -94,8 +99,8 @@ func NewController(
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: kubeclientset.CoreV1().Events("")})
 	recorder := eventBroadcaster.NewRecorder(webappscheme.Scheme, corev1.EventSource{Component: "web-app-controller"})
 	ratelimiter := workqueue.NewTypedMaxOfRateLimiter(
-		workqueue.NewTypedItemExponentialFailureRateLimiter[cache.ObjectName](5*time.Millisecond, 1000*time.Second),
-		&workqueue.TypedBucketRateLimiter[cache.ObjectName]{Limiter: rate.NewLimiter(rate.Limit(50), 300)},
+		workqueue.NewTypedItemExponentialFailureRateLimiter[types.NamespacedName](5*time.Millisecond, 1000*time.Second),
+		&workqueue.TypedBucketRateLimiter[types.NamespacedName]{Limiter: rate.NewLimiter(rate.Limit(50), 300)},
 	)
 
 	controller := &Controller{
@@ -114,6 +119,7 @@ func NewController(
 		UpdateFunc: func(old, new interface{}) {
 			controller.enqueueWebApp(new)
 		},
+		DeleteFunc: controller.enqueueWebApp,
 	})
 
 	return controller, nil
@@ -124,7 +130,7 @@ func (c *Controller) enqueueWebApp(obj interface{}) {
 		utilruntime.HandleError(err)
 		return
 	} else {
-		c.workqueue.Add(objectRef)
+		c.workqueue.Add(types.NamespacedName{Namespace: objectRef.Namespace, Name: objectRef.Name})
 	}
 }
 
@@ -169,18 +175,58 @@ func (c *Controller) processNextWorkItem(ctx context.Context) bool {
 	return true
 }
 
-func (c *Controller) syncHandler(ctx context.Context, objectRef cache.ObjectName) error {
+func (c *Controller) syncHandler(ctx context.Context, objectRef types.NamespacedName) error {
 	logger := klog.FromContext(ctx)
+	executor := &defaultTaskExecutor{}
 
 	webapp, err := c.webappsLister.WebApps(objectRef.Namespace).Get(objectRef.Name)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			utilruntime.HandleError(fmt.Errorf("webapp '%s' in work queue no longer exists", objectRef.Namespace+"/"+objectRef.Name))
+			// 当对象不存在时，执行删除操作
+			dummyWebApp := &v1.WebApp{}
+			dummyWebApp.Namespace = objectRef.Namespace
+			dummyWebApp.Name = objectRef.Name
+
+			if err := executor.PreDelete(ctx, dummyWebApp); err != nil {
+				return fmt.Errorf("执行 PreDelete 失败: %v", err)
+			}
+			if err := executor.Delete(ctx, dummyWebApp); err != nil {
+				return fmt.Errorf("执行 Delete 失败: %v", err)
+			}
+			if err := executor.PostDelete(ctx, dummyWebApp); err != nil {
+				return fmt.Errorf("执行 PostDelete 失败: %v", err)
+			}
+
+			logger.Info("同步 webapp 删除完成", "webapp", objectRef.String())
 			return nil
 		}
 		return err
 	}
 
-	logger.Info("Syncing webapp", "webapp", webapp, "spec", webapp.Spec)
+	// 检查是否为删除操作
+	if webapp.DeletionTimestamp != nil {
+		if err := executor.PreDelete(ctx, webapp); err != nil {
+			return fmt.Errorf("执行 PreDelete 失败: %v", err)
+		}
+		if err := executor.Delete(ctx, webapp); err != nil {
+			return fmt.Errorf("执行 Delete 失败: %v", err)
+		}
+		if err := executor.PostDelete(ctx, webapp); err != nil {
+			return fmt.Errorf("执行 PostDelete 失败: %v", err)
+		}
+	} else {
+		// Create/Update 操作
+		if err := executor.PreCreate(ctx, webapp); err != nil {
+			return fmt.Errorf("执行 PreCreate 失败: %v", err)
+		}
+		if err := executor.Create(ctx, webapp); err != nil {
+			return fmt.Errorf("执行 Create 失败: %v", err)
+		}
+		if err := executor.PostCreate(ctx, webapp); err != nil {
+			return fmt.Errorf("执行 PostCreate 失败: %v", err)
+		}
+	}
+
+	logger.Info("同步 webapp 完成", "webapp", webapp.Name)
 	return nil
 }
