@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jiajunhuang/test/pkg/controller"
+	"github.com/jiajunhuang/test/pkg/controller/tasks"
 	clientset "github.com/jiajunhuang/test/pkg/generated/clientset/versioned"
 	informers "github.com/jiajunhuang/test/pkg/generated/informers/externalversions"
 	kubeinformers "k8s.io/client-go/informers"
@@ -49,7 +50,12 @@ func main() {
 	exampleInformerFactory := informers.NewSharedInformerFactory(exampleClient, time.Second*30)
 
 	controller, err := controller.NewController(ctx, kubeClient, exampleClient,
-		exampleInformerFactory.Jiajunhuang().V1().WebApps())
+		exampleInformerFactory.Jiajunhuang().V1().WebApps(),
+		[]tasks.TaskExecutor{
+			&tasks.Step1TaskExecutor{},
+			&tasks.Step2TaskExecutor{},
+			&tasks.Step3TaskExecutor{},
+		})
 	if err != nil {
 		logger.Error(err, "Error creating controller")
 		klog.FlushAndExit(klog.ExitFlushTimeout, 1)

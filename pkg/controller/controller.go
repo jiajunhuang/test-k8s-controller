@@ -20,58 +20,13 @@ import (
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	v1 "github.com/jiajunhuang/test/pkg/apis/jiajunhuang.com/v1"
+	"github.com/jiajunhuang/test/pkg/controller/tasks"
 	clientset "github.com/jiajunhuang/test/pkg/generated/clientset/versioned"
 	webappscheme "github.com/jiajunhuang/test/pkg/generated/clientset/versioned/scheme"
 	informers "github.com/jiajunhuang/test/pkg/generated/informers/externalversions/jiajunhuang.com/v1"
 	v1lister "github.com/jiajunhuang/test/pkg/generated/listers/jiajunhuang.com/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
-
-// TaskExecutor 定义任务执行器接口
-type TaskExecutor interface {
-	PreCreate(ctx context.Context, webapp *v1.WebApp) error
-	Create(ctx context.Context, webapp *v1.WebApp) error
-	PostCreate(ctx context.Context, webapp *v1.WebApp) error
-	PreDelete(ctx context.Context, webapp *v1.WebApp) error
-	Delete(ctx context.Context, webapp *v1.WebApp) error
-	PostDelete(ctx context.Context, webapp *v1.WebApp) error
-}
-
-// defaultTaskExecutor 实现 TaskExecutor 接口
-type defaultTaskExecutor struct {
-	// 可以在这里添加需要的依赖
-}
-
-// 实现所有接口方法
-func (e *defaultTaskExecutor) PreCreate(ctx context.Context, webapp *v1.WebApp) error {
-	klog.FromContext(ctx).Info("执行 PreCreate", "webapp", webapp.Name)
-	return nil
-}
-
-func (e *defaultTaskExecutor) Create(ctx context.Context, webapp *v1.WebApp) error {
-	klog.FromContext(ctx).Info("执行 Create", "webapp", webapp.Name)
-	return nil
-}
-
-func (e *defaultTaskExecutor) PostCreate(ctx context.Context, webapp *v1.WebApp) error {
-	klog.FromContext(ctx).Info("执行 PostCreate", "webapp", webapp.Name)
-	return nil
-}
-
-func (e *defaultTaskExecutor) PreDelete(ctx context.Context, webapp *v1.WebApp) error {
-	klog.FromContext(ctx).Info("执行 PreDelete", "webapp", webapp.Name)
-	return nil
-}
-
-func (e *defaultTaskExecutor) Delete(ctx context.Context, webapp *v1.WebApp) error {
-	klog.FromContext(ctx).Info("执行 Delete", "webapp", webapp.Name)
-	return nil
-}
-
-func (e *defaultTaskExecutor) PostDelete(ctx context.Context, webapp *v1.WebApp) error {
-	klog.FromContext(ctx).Info("执行 PostDelete", "webapp", webapp.Name)
-	return nil
-}
 
 type Controller struct {
 	kubeclientset kubernetes.Interface
@@ -83,7 +38,7 @@ type Controller struct {
 	workqueue workqueue.TypedRateLimitingInterface[types.NamespacedName]
 	recorder  record.EventRecorder
 
-	executor TaskExecutor
+	tasks []tasks.TaskExecutor
 }
 
 const (
@@ -96,6 +51,7 @@ func NewController(
 	kubeclientset kubernetes.Interface,
 	webclientset clientset.Interface,
 	webappsInformer informers.WebAppInformer,
+	tasks []tasks.TaskExecutor,
 ) (*Controller, error) {
 	logger := klog.FromContext(ctx)
 	utilruntime.Must(webappscheme.AddToScheme(webappscheme.Scheme))
@@ -116,6 +72,7 @@ func NewController(
 		webappsSynced: webappsInformer.Informer().HasSynced,
 		workqueue:     workqueue.NewTypedRateLimitingQueue(ratelimiter),
 		recorder:      recorder,
+		tasks:         tasks,
 	}
 
 	logger.Info("Starting web-app-controller")
@@ -183,7 +140,6 @@ func (c *Controller) processNextWorkItem(ctx context.Context) bool {
 
 func (c *Controller) syncHandler(ctx context.Context, objectRef types.NamespacedName) error {
 	logger := klog.FromContext(ctx)
-	executor := &defaultTaskExecutor{}
 
 	webapp, err := c.webappsLister.WebApps(objectRef.Namespace).Get(objectRef.Name)
 	if err != nil && !apierrors.IsNotFound(err) {
@@ -198,19 +154,39 @@ func (c *Controller) syncHandler(ctx context.Context, objectRef types.Namespaced
 
 	// 处理删除操作
 	if webapp.DeletionTimestamp != nil {
-		return c.handleDeletion(ctx, webapp, executor)
+		// execute deletion tasks in reverse order
+		for i := len(c.tasks) - 1; i >= 0; i-- {
+			if err := c.handleDeletion(ctx, webapp, c.tasks[i]); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 
 	// 处理创建/更新操作
-	return c.handleCreation(ctx, webapp, executor)
+	for _, executor := range c.tasks {
+		if err := c.handleCreation(ctx, webapp, executor); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // 处理删除操作
-func (c *Controller) handleDeletion(ctx context.Context, webapp *v1.WebApp, executor TaskExecutor) error {
+func (c *Controller) handleDeletion(ctx context.Context, webapp *v1.WebApp, executor tasks.TaskExecutor) error {
 	logger := klog.FromContext(ctx)
 
+	// 获取最新版本的对象
+	currentWebApp, err := c.webclientset.JiajunhuangV1().WebApps(webapp.Namespace).Get(ctx, webapp.Name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("获取最新版本的 WebApp 失败: %v", err)
+	}
+
 	// 检查是否包含我们的 finalizer
-	if !containsFinalizer(webapp.Finalizers, webappFinalizer) {
+	if !containsFinalizer(currentWebApp.Finalizers, webappFinalizer) {
 		return nil
 	}
 
@@ -225,38 +201,47 @@ func (c *Controller) handleDeletion(ctx context.Context, webapp *v1.WebApp, exec
 		return fmt.Errorf("执行 PostDelete 失败: %v", err)
 	}
 
-	// 删除 finalizer
-	webappCopy := webapp.DeepCopy()
-	webappCopy.Finalizers = removeFinalizer(webappCopy.Finalizers, webappFinalizer)
-	_, err := c.webclientset.JiajunhuangV1().WebApps(webapp.Namespace).Update(ctx, webappCopy, metav1.UpdateOptions{})
-	if err != nil {
-		return fmt.Errorf("移除 finalizer 失败: %v", err)
+	// 只有当这是最后一个任务时才移除 finalizer
+	if executor == c.tasks[0] {
+		// 使用最新版本的对象移除 finalizer
+		webappCopy := currentWebApp.DeepCopy()
+		webappCopy.Finalizers = removeFinalizer(webappCopy.Finalizers, webappFinalizer)
+		_, err = c.webclientset.JiajunhuangV1().WebApps(webapp.Namespace).Update(ctx, webappCopy, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("移除 finalizer 失败: %v", err)
+		}
 	}
 
-	logger.Info("成功完成删除操作", "webapp", webapp.Name)
+	logger.Info("成功完成删除操作", "webapp", webapp.Name, "executor", fmt.Sprintf("%T", executor))
 	return nil
 }
 
 // 处理创建/更新操作
-func (c *Controller) handleCreation(ctx context.Context, webapp *v1.WebApp, executor TaskExecutor) error {
+func (c *Controller) handleCreation(ctx context.Context, webapp *v1.WebApp, executor tasks.TaskExecutor) error {
+	logger := klog.FromContext(ctx)
+
+	// 添加 finalizer 前先获取最新版本的对象
+	currentWebApp, err := c.webclientset.JiajunhuangV1().WebApps(webapp.Namespace).Get(ctx, webapp.Name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("获取最新版本的 WebApp 失败: %v", err)
+	}
+
 	// 确保有 finalizer
-	if !containsFinalizer(webapp.Finalizers, webappFinalizer) {
-		webappCopy := webapp.DeepCopy()
+	if !containsFinalizer(currentWebApp.Finalizers, webappFinalizer) {
+		webappCopy := currentWebApp.DeepCopy()
 		webappCopy.Finalizers = append(webappCopy.Finalizers, webappFinalizer)
-		var err error
-		webapp, err = c.webclientset.JiajunhuangV1().WebApps(webapp.Namespace).Update(ctx, webappCopy, metav1.UpdateOptions{})
+		currentWebApp, err = c.webclientset.JiajunhuangV1().WebApps(webapp.Namespace).Update(ctx, webappCopy, metav1.UpdateOptions{})
 		if err != nil {
-			// 如果是验证错误，记录详细信息并返回
 			if apierrors.IsInvalid(err) {
-				logger := klog.FromContext(ctx)
 				logger.Error(err, "资源验证失败",
 					"webapp", klog.KObj(webapp),
 					"details", err.(*apierrors.StatusError).ErrStatus.Details)
-				// 这种情况下不需要重试
 				return nil
 			}
 			return fmt.Errorf("添加 finalizer 失败: %v", err)
 		}
+		// 更新成功后，使用最新版本继续处理
+		webapp = currentWebApp
 	}
 
 	if err := executor.PreCreate(ctx, webapp); err != nil {

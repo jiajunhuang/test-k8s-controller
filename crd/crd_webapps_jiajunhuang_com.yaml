@@ -50,6 +50,8 @@ spec:
                     lastTransitionTime:
                       type: string
                       format: date-time
+                    phase:
+                      type: string
                     reason:
                       type: string
                     message:
